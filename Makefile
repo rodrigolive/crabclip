@@ -59,7 +59,7 @@ uninstall: ## Quit and remove /Applications/crabclip.app (keeps your history db)
 import-collective: ## Import Collective.app's saved history (quit Collective first so it saves)
 	target/release/$(APP) --import-collective
 
-import-clipy: ## Import Clipy's history and snippet folders (FILE=snippets.xml for an export)
+import-clipy: ## Import Clipy's history, snippet folders and shortcuts (FILE=snippets.xml for an export)
 	target/release/$(APP) --import-clipy $(FILE)
 
 unload-collective: ## Quit Collective (lets it save) and remove it from login items

@@ -9,7 +9,8 @@ use objc2_app_kit::{
     NSApplication, NSApplicationDelegate, NSBackgroundStyle, NSControl, NSControlTextEditingDelegate,
     NSEvent, NSMenuDelegate, NSPanel, NSSearchFieldDelegate, NSTableRowView, NSTableView,
     NSTableViewDataSource, NSTableViewDelegate, NSTextFieldDelegate, NSTextView, NSView,
-    NSWindowDelegate, NSTableColumn, NSTokenField, NSTokenFieldDelegate,
+    NSWindowDelegate, NSTableColumn, NSTokenField, NSTokenFieldDelegate, NSToolbar, NSToolbarDelegate,
+    NSToolbarItem,
 };
 use objc2_foundation::{NSArray, NSInteger, NSNotification, NSPoint, NSRect, NSSize, NSString};
 use std::cell::{Cell, RefCell};
@@ -30,6 +31,7 @@ define_class!(
 
         #[unsafe(method(applicationWillTerminate:))]
         fn will_terminate(&self, _n: &NSNotification) {
+            super::prefs::save_snippet_edits();
             app().finish_delete();
         }
 
@@ -123,6 +125,29 @@ define_class!(
         }
     }
     unsafe impl NSSearchFieldDelegate for Handler {}
+
+    // The Preferences window's tabs.
+    unsafe impl NSToolbarDelegate for Handler {
+        #[unsafe(method_id(toolbar:itemForItemIdentifier:willBeInsertedIntoToolbar:))]
+        fn toolbar_item(&self, _tb: &NSToolbar, id: &NSString, _flag: bool) -> Option<Retained<NSToolbarItem>> {
+            super::prefs::tab_item(&id.to_string())
+        }
+
+        #[unsafe(method_id(toolbarDefaultItemIdentifiers:))]
+        fn toolbar_default(&self, _tb: &NSToolbar) -> Retained<NSArray<NSString>> {
+            super::prefs::tab_ids()
+        }
+
+        #[unsafe(method_id(toolbarAllowedItemIdentifiers:))]
+        fn toolbar_allowed(&self, _tb: &NSToolbar) -> Retained<NSArray<NSString>> {
+            super::prefs::tab_ids()
+        }
+
+        #[unsafe(method_id(toolbarSelectableItemIdentifiers:))]
+        fn toolbar_selectable(&self, _tb: &NSToolbar) -> Retained<NSArray<NSString>> {
+            super::prefs::tab_ids()
+        }
+    }
 
     unsafe impl NSWindowDelegate for Handler {
         #[unsafe(method(windowDidResignKey:))]
@@ -245,6 +270,13 @@ define_class!(
             super::prefs::action(sender);
         }
 
+        #[unsafe(method(prefTab:))]
+        fn pref_tab(&self, sender: Option<&NSToolbarItem>) {
+            if let Some(item) = sender {
+                super::prefs::select_tab(&item.itemIdentifier().to_string());
+            }
+        }
+
         #[unsafe(method(postPaste:))]
         fn post_paste(&self, _s: Option<&AnyObject>) {
             app().post_paste();
@@ -254,6 +286,11 @@ define_class!(
         fn quit_from_notification(&self, _n: Option<&AnyObject>) {
             crate::log!("another instance (login agent) takes over");
             app().quit();
+        }
+
+        #[unsafe(method(shortcutsFromNotification:))]
+        fn shortcuts_from_notification(&self, _n: Option<&AnyObject>) {
+            super::prefs::reload_hotkeys();
         }
 
         #[unsafe(method(showFromNotification:))]

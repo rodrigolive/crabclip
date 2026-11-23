@@ -21,12 +21,26 @@ pub fn ui_scale_stop(pct: f64) -> usize {
         .unwrap_or(6)
 }
 
+/// A global shortcut that opens the history straight into a folder.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FolderShortcut {
+    /// Folder path ("Clients/Formosa"). If it is gone, the shortcut opens the
+    /// nearest folder still there.
+    pub folder: String,
+    /// global-hotkey syntax, one or more like `hotkey` ("" = none yet).
+    pub hotkey: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
-    /// Global shortcut, global-hotkey syntax ("cmd+alt+v").
+    /// Global shortcuts for the history, global-hotkey syntax, comma-separated
+    /// ("cmd+alt+v" or "cmd+alt+v, ctrl+shift+cmd+v").
     pub hotkey: String,
-    /// Global shortcut that opens straight into the snippet folders ("" = none).
+    /// Global shortcuts that open straight into the snippet folders ("" = none).
     pub folder_hotkey: String,
+    /// Global shortcuts that open the preferences ("" = none).
+    pub prefs_hotkey: String,
+    pub folder_shortcuts: Vec<FolderShortcut>,
     /// Where the window opens: "last" position, under the "menubar" icon, or at the "mouse".
     pub open_at: String,
     pub launch_at_login: bool,
@@ -58,6 +72,8 @@ impl Default for Settings {
         Settings {
             hotkey: "cmd+alt+v".into(),
             folder_hotkey: String::new(),
+            prefs_hotkey: String::new(),
+            folder_shortcuts: Vec::new(),
             open_at: "last".into(),
             launch_at_login: true,
             move_to_top: true,
@@ -87,6 +103,28 @@ fn b(v: bool) -> String {
     if v { "1".into() } else { "0".into() }
 }
 
+/// `path` is `folder` or a folder below it (any case): the rest of it
+/// ("" or "/Sub").
+fn below<'a>(path: &'a str, folder: &str) -> Option<&'a str> {
+    let n = folder.len();
+    let head = path.get(..n)?;
+    let rest = &path[n..];
+    (head.to_lowercase() == folder.to_lowercase() && (rest.is_empty() || rest.starts_with('/'))).then_some(rest)
+}
+
+/// One shortcut a line: "hotkey<TAB>folder path".
+fn folder_shortcuts_to_string(list: &[FolderShortcut]) -> String {
+    list.iter().map(|f| format!("{}\t{}", f.hotkey.trim(), f.folder.trim())).collect::<Vec<_>>().join("\n")
+}
+
+fn folder_shortcuts_from_str(v: &str) -> Vec<FolderShortcut> {
+    v.lines()
+        .filter_map(|l| l.split_once('\t'))
+        .map(|(k, f)| FolderShortcut { folder: f.trim().to_string(), hotkey: k.trim().to_string() })
+        .filter(|f| !f.folder.is_empty())
+        .collect()
+}
+
 impl Settings {
     pub fn load(db: &Db) -> Settings {
         let d = Settings::default();
@@ -95,6 +133,8 @@ impl Settings {
         Settings {
             hotkey: get("hotkey").unwrap_or(d.hotkey),
             folder_hotkey: get("folder_hotkey").unwrap_or(d.folder_hotkey),
+            prefs_hotkey: get("prefs_hotkey").unwrap_or(d.prefs_hotkey),
+            folder_shortcuts: get("folder_shortcuts").map(|v| folder_shortcuts_from_str(&v)).unwrap_or(d.folder_shortcuts),
             open_at: get("open_at").unwrap_or(d.open_at),
             launch_at_login: flag("launch_at_login", d.launch_at_login),
             move_to_top: flag("move_to_top", d.move_to_top),
@@ -121,6 +161,27 @@ impl Settings {
         }
     }
 
+    /// A folder was renamed (or moved) from path `old` to `new`: shortcuts to
+    /// it and to folders below it follow. True if any did.
+    pub fn folder_renamed(&mut self, old: &str, new: &str) -> bool {
+        let mut changed = false;
+        for f in &mut self.folder_shortcuts {
+            if let Some(rest) = below(&f.folder, old) {
+                f.folder = format!("{new}{rest}");
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    /// A folder was deleted: shortcuts to it and to folders below it go.
+    /// True if any did.
+    pub fn folder_deleted(&mut self, path: &str) -> bool {
+        let n = self.folder_shortcuts.len();
+        self.folder_shortcuts.retain(|f| below(&f.folder, path).is_none());
+        n != self.folder_shortcuts.len()
+    }
+
     pub fn save(&self, db: &Db) {
         if READ_ONLY.load(Ordering::Relaxed) {
             return;
@@ -128,6 +189,8 @@ impl Settings {
         let pairs = [
             ("hotkey", self.hotkey.clone()),
             ("folder_hotkey", self.folder_hotkey.clone()),
+            ("prefs_hotkey", self.prefs_hotkey.clone()),
+            ("folder_shortcuts", folder_shortcuts_to_string(&self.folder_shortcuts)),
             ("open_at", self.open_at.clone()),
             ("launch_at_login", b(self.launch_at_login)),
             ("move_to_top", b(self.move_to_top)),

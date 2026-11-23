@@ -3,6 +3,7 @@ pub mod ax;
 pub mod clipy;
 pub mod collective;
 pub mod db;
+pub mod hotkeys;
 pub mod imageio;
 pub mod ingest;
 pub mod log;

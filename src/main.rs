@@ -6,7 +6,7 @@ fn usage() {
         "crabclip {} — forever clipboard history\n\n\
          Usage:\n  crabclip                         run the menu bar app\n  \
          crabclip --import-collective [archive...]   import Collective.app history (default: its container)\n  \
-         crabclip --import-clipy [file]   import Clipy's history and snippets (its sqlite.db, or a snippets XML export)\n  \
+         crabclip --import-clipy [file]   import Clipy's history, snippets and shortcuts (its sqlite.db, or a snippets XML export)\n  \
          crabclip --stats                 print database stats\n  \
          crabclip --search <query>        search from the terminal",
         env!("CARGO_PKG_VERSION")
@@ -64,8 +64,9 @@ fn main() {
                 println!("No Clipy database found. Open the current Clipy once (it converts older data), or pass a snippets XML export.");
                 std::process::exit(1);
             };
+            let prefs = crabclip::clipy::default_prefs();
             let mut last = std::time::Instant::now();
-            let r = crabclip::clipy::import(&path, &db, &settings, |st| {
+            let r = crabclip::clipy::import(&path, prefs.as_ref(), &db, &settings, |st| {
                 if last.elapsed().as_secs() >= 2 {
                     last = std::time::Instant::now();
                     eprintln!("  {}/{} history clips", st.added + st.merged + st.skipped, st.history);
@@ -73,7 +74,13 @@ fn main() {
             });
             let _ = db.vacuum_some();
             match r {
-                Ok(st) => println!("{}", st.summary()),
+                Ok(st) => {
+                    if st.shortcuts > 0 {
+                        // A running crabclip takes them now (and won't save its old ones over them).
+                        crabclip::ui::post_distributed(crabclip::ui::SHORTCUTS_NOTIFICATION);
+                    }
+                    println!("{}", st.summary())
+                }
                 Err(e) => {
                     println!("{}: {e}", path.display());
                     std::process::exit(1);

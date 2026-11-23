@@ -6,8 +6,10 @@ pub mod classes;
 mod draw;
 pub mod folders;
 pub mod prefs;
+mod snippets;
 
 use crate::db::{Db, Detail, Filter, Kind, RowInfo};
+use crate::hotkeys::{self, Action};
 use crate::ingest::{Capture, SKIP_MARKERS};
 use crate::settings::Settings;
 use crate::worker::{Event, Job};
@@ -39,6 +41,8 @@ use std::time::Instant;
 
 pub const SHOW_NOTIFICATION: &str = "com.rod.crabclip.show";
 pub const QUIT_NOTIFICATION: &str = "com.rod.crabclip.quit";
+/// Shortcut settings were changed by another process (`--import-clipy`).
+pub const SHORTCUTS_NOTIFICATION: &str = "com.rod.crabclip.shortcuts";
 pub const AGENT_LABEL: &str = "com.rod.crabclip.agent";
 pub const PANEL_AUTOSAVE: &str = "crabclip.panel";
 const CACHE_ROWS: usize = 160;
@@ -104,9 +108,8 @@ pub struct App {
     prev_app: RefCell<Option<Retained<NSRunningApplication>>>,
     app_filter: RefCell<Option<String>>,
     hotkey: RefCell<Option<(GlobalHotKeyManager, Vec<HotKey>)>>,
-    folder_hotkey_id: Cell<u32>,
-    /// Why the folder shortcut couldn't be registered, if it couldn't.
-    pub folder_hotkey_err: RefCell<Option<String>>,
+    /// What each registered shortcut opens, by hotkey id.
+    hotkey_actions: RefCell<HashMap<u32, Action>>,
     /// Folder mode (the search starts with "/"): the folder listed (-1: none
     /// at that path) and what each row is.
     folder: Cell<Option<i64>>,
@@ -204,8 +207,7 @@ fn start(handler: &Handler) {
         prev_app: RefCell::new(None),
         app_filter: RefCell::new(None),
         hotkey: RefCell::new(None),
-        folder_hotkey_id: Cell::new(0),
-        folder_hotkey_err: RefCell::new(None),
+        hotkey_actions: RefCell::new(HashMap::new()),
         folder: Cell::new(None),
         entries: RefCell::new(HashMap::new()),
         select_after: Cell::new(None),
@@ -238,13 +240,7 @@ fn start(handler: &Handler) {
         std::process::exit(0);
     }
 
-    if let Err(e) = a.register_hotkey() {
-        log!("hotkey: {e}");
-        if let Some(btn) = a.ui().status_item.button(a.mtm) {
-            let spec = a.settings.borrow().hotkey.clone();
-            btn.setToolTip(Some(&NSString::from_str(&format!("crabclip — {} unavailable", hotkey_label(&spec)))));
-        }
-    }
+    a.register_hotkeys();
 
     unsafe {
         let timer = NSTimer::timerWithTimeInterval_target_selector_userInfo_repeats(
@@ -266,6 +262,12 @@ fn start(handler: &Handler) {
             &a.handler,
             sel!(quitFromNotification:),
             Some(&NSString::from_str(QUIT_NOTIFICATION)),
+            None,
+        );
+        center.addObserver_selector_name_object(
+            &a.handler,
+            sel!(shortcutsFromNotification:),
+            Some(&NSString::from_str(SHORTCUTS_NOTIFICATION)),
             None,
         );
     }
@@ -337,6 +339,10 @@ impl App {
             self.toggle_preview();
             log!("snapshot: preview toggled, window {w} -> {}, list {} split {}", ui.panel.frame().size.width, ui.list.frame().size.width, ui.split.frame().size.width);
         }
+        if std::env::var("CRABCLIP_SNAPSHOT_PREFS").is_ok() {
+            prefs::snapshot(out);
+            return;
+        }
         if std::env::var("CRABCLIP_SNAPSHOT_LIVE").is_ok() {
             // Real compositing, far off every screen and never key: nothing
             // shows and no keystroke can land in it.
@@ -373,29 +379,19 @@ impl App {
 
     // ---------------------------------------------------------------- hotkey
 
-    /// (Re)register the global shortcuts: the history and, if set, the
-    /// snippet folders.
-    pub fn register_hotkey(&self) -> Result<(), String> {
-        let (spec, fspec) = {
-            let s = self.settings.borrow();
-            (s.hotkey.clone(), s.folder_hotkey.trim().to_string())
-        };
-        let hk: HotKey = spec.parse().map_err(|e| format!("bad shortcut {spec:?}: {e}"))?;
-        let fhk: Option<HotKey> = if fspec.is_empty() {
-            None
-        } else {
-            match fspec.parse() {
-                Ok(h) => Some(h),
-                Err(e) => {
-                    log!("hotkey: bad folders shortcut {fspec:?}: {e}");
-                    None
-                }
-            }
-        };
-        let fhk = fhk.filter(|f| f.id() != hk.id());
+    /// (Re)register every global shortcut. Returns the ones that couldn't be
+    /// had (bad syntax, another app holds them) and why; the others work.
+    pub fn register_hotkeys(&self) -> Vec<(String, String)> {
+        let bindings = hotkeys::bindings(&self.settings.borrow());
         let mut slot = self.hotkey.borrow_mut();
         if slot.is_none() {
-            let m = GlobalHotKeyManager::new().map_err(|e| e.to_string())?;
+            let m = match GlobalHotKeyManager::new() {
+                Ok(m) => m,
+                Err(e) => {
+                    log!("hotkey: {e}");
+                    return bindings.into_iter().map(|(k, _)| (k, e.to_string())).collect();
+                }
+            };
             GlobalHotKeyEvent::set_event_handler(Some(|e: GlobalHotKeyEvent| {
                 if e.state == HotKeyState::Pressed {
                     let id = e.id;
@@ -408,40 +404,61 @@ impl App {
         for old in current.drain(..) {
             let _ = m.unregister(old);
         }
-        self.folder_hotkey_id.set(0);
-        m.register(hk).map_err(|e| format!("cannot register {spec}: {e}"))?;
-        current.push(hk);
-        // A folder shortcut that can't be had (another app holds it) doesn't
-        // take the history's down with it.
-        *self.folder_hotkey_err.borrow_mut() = None;
-        if let Some(f) = fhk {
-            match m.register(f) {
+        let mut actions = self.hotkey_actions.borrow_mut();
+        actions.clear();
+        let mut failed = Vec::new();
+        let mut history = Vec::new();
+        for (spec, action) in bindings {
+            let hk = match hotkeys::parse(&spec) {
+                Ok(h) => h,
+                Err(e) => {
+                    failed.push((spec, e));
+                    continue;
+                }
+            };
+            let res = match actions.get(&hk.id()) {
+                Some(other) => Err(format!("{} already opens {}", hotkeys::label(&spec), other.describe())),
+                // Another app holding it doesn't take the other shortcuts down.
+                None => m.register(hk).map_err(|e| format!("cannot register {}: {e}", hotkeys::label(&spec))),
+            };
+            match res {
                 Ok(()) => {
-                    current.push(f);
-                    self.folder_hotkey_id.set(f.id());
+                    log!("hotkey: {spec} opens {}", action.describe());
+                    if action == Action::History {
+                        history.push(hotkeys::label(&spec));
+                    }
+                    current.push(hk);
+                    actions.insert(hk.id(), action);
                 }
                 Err(e) => {
-                    log!("hotkey: folders {fspec}: {e}");
-                    *self.folder_hotkey_err.borrow_mut() = Some(format!("cannot register {fspec}: {e}"));
+                    log!("hotkey: {e}");
+                    failed.push((spec, e));
                 }
             }
         }
-        log!("hotkey: {spec}{}", if fspec.is_empty() { String::new() } else { format!(", folders: {fspec}") });
         if let Some(btn) = self.ui.get().and_then(|ui| ui.status_item.button(self.mtm)) {
-            btn.setToolTip(Some(&NSString::from_str(&format!("crabclip — {}", hotkey_label(&spec)))));
+            let tip = if history.is_empty() {
+                format!("crabclip — {} unavailable", hotkeys::labels(&self.settings.borrow().hotkey))
+            } else {
+                format!("crabclip — {}", history.join(", "))
+            };
+            btn.setToolTip(Some(&NSString::from_str(&tip)));
         }
-        Ok(())
+        failed
     }
 
     fn hotkey_pressed(&self, id: u32) {
-        let folders = id != 0 && id == self.folder_hotkey_id.get();
+        let Some(action) = self.hotkey_actions.borrow().get(&id).cloned() else { return };
         let p = &self.ui().panel;
-        if p.isVisible() && p.isKeyWindow() && folders == self.in_folders() {
-            self.hide();
-        } else if folders {
-            self.show_folders();
-        } else {
-            self.show();
+        let up = p.isVisible() && p.isKeyWindow();
+        match action {
+            Action::History if up && !self.in_folders() => self.hide(),
+            Action::History => self.show(),
+            Action::Folders if up && self.in_folders() => self.hide(),
+            Action::Folders => self.show_folders(),
+            Action::Folder(path) if up && self.folder.get() == self.db.nearest_folder(&path).ok() => self.hide(),
+            Action::Folder(path) => self.show_folder(&path),
+            Action::Prefs => prefs::toggle(),
         }
     }
 
@@ -1968,7 +1985,7 @@ pub fn running_as_agent() -> bool {
     std::env::var("XPC_SERVICE_NAME").is_ok_and(|v| v == AGENT_LABEL)
 }
 
-fn post_distributed(name: &str) {
+pub fn post_distributed(name: &str) {
     unsafe {
         NSDistributedNotificationCenter::defaultCenter().postNotificationName_object_userInfo_deliverImmediately(
             &NSString::from_str(name),
@@ -1983,25 +2000,6 @@ pub fn symbol(name: &str) -> Option<Retained<NSImage>> {
     NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(name), None)
 }
 
-/// "cmd+ctrl+v" → "⌘⌃V", the way menus show shortcuts.
-fn hotkey_label(spec: &str) -> String {
-    let mut mods = String::new();
-    let mut key = String::new();
-    for part in spec.split('+').map(|p| p.trim().to_lowercase()) {
-        match part.as_str() {
-            "ctrl" | "control" => mods.push('⌃'),
-            "alt" | "option" | "opt" => mods.push('⌥'),
-            "shift" => mods.push('⇧'),
-            "cmd" | "command" | "super" | "meta" | "cmdorctrl" | "cmdorcontrol" => mods.push('⌘'),
-            k => key = key_label(k),
-        }
-    }
-    // Menus order modifiers ⌃⌥⇧⌘.
-    let mut m: Vec<char> = mods.chars().collect();
-    m.sort_by_key(|c| "⌃⌥⇧⌘".chars().position(|x| x == *c));
-    m.into_iter().collect::<String>() + &key
-}
-
 /// How a tag reads in the tag field: the password tag gets a lock.
 pub fn tag_label(name: &str) -> String {
     if name == crate::db::PASSWORD { format!("🔒 {name}") } else { name.to_string() }
@@ -2009,26 +2007,6 @@ pub fn tag_label(name: &str) -> String {
 
 fn is_obj<A: ?Sized + objc2::Message, B: ?Sized + objc2::Message>(a: Option<&A>, b: &B) -> bool {
     a.is_some_and(|a| std::ptr::eq(a as *const A as *const AnyObject, b as *const B as *const AnyObject))
-}
-
-fn key_label(k: &str) -> String {
-    let k = k.strip_prefix("key").or_else(|| k.strip_prefix("digit")).unwrap_or(k);
-    match k {
-        "space" => "Space".into(),
-        "enter" | "return" => "↩".into(),
-        "tab" => "⇥".into(),
-        "backspace" => "⌫".into(),
-        "escape" | "esc" => "⎋".into(),
-        "arrowup" | "up" => "↑".into(),
-        "arrowdown" | "down" => "↓".into(),
-        "arrowleft" | "left" => "←".into(),
-        "arrowright" | "right" => "→".into(),
-        _ if k.chars().count() == 1 => k.to_uppercase(),
-        _ => {
-            let mut c = k.chars();
-            c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
-        }
-    }
 }
 
 fn is_code_app(bundle: &str) -> bool {

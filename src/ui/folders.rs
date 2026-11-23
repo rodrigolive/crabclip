@@ -70,14 +70,28 @@ impl App {
         })
     }
 
-    /// Show the history browsing the folders (the folder shortcut).
+    /// Show the history browsing the folders (the folders shortcut).
     pub fn show_folders(&self) {
+        self.show_folder("");
+    }
+
+    /// Show the history in the folder at `path` (a folder's shortcut), or in
+    /// its nearest parent still there if it is gone.
+    pub fn show_folder(&self, path: &str) {
+        let fid = self.db.nearest_folder(path).unwrap_or(0);
+        if fid == 0 && !path.is_empty() {
+            log!("folders: {path:?} is gone, showing the top level");
+        }
+        let q = match self.db.folder_path(fid).unwrap_or_default() {
+            p if p.is_empty() => "/".to_string(),
+            p => format!("/{p}/"),
+        };
         self.show();
-        self.set_search("/");
+        self.set_search(&q);
         self.run_search(true);
         let ui = self.ui();
         ui.panel.makeFirstResponder(Some(&ui.search));
-        self.set_search("/");
+        self.set_search(&q);
     }
 
     pub fn open_folder(&self, fid: i64) {
