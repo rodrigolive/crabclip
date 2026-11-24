@@ -339,12 +339,7 @@ pub fn row(v: &RowView) {
             let isz = (content.size.height - 4.0).min(40.0);
             draw_image(&fi, NSRect::new(NSPoint::new(content.origin.x, content.origin.y + (content.size.height - isz) / 2.0), NSSize::new(isz, isz)));
             let n = d.info.preview.lines().count();
-            let dir = path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-            let home = std::env::var("HOME").unwrap_or_default();
-            let dir = match dir.strip_prefix(&home) {
-                Some(rest) if !home.is_empty() => format!("~{rest}"),
-                _ => dir.to_string(),
-            };
+            let dir = super::files::tilde(path.rsplit_once('/').map(|(d, _)| d).unwrap_or(""));
             let label = if n > 1 { format!("{first}\n+ {} more", n - 1) } else { format!("{first}\n{dir}") };
             let tr = NSRect::new(
                 NSPoint::new(content.origin.x + isz + 8.0, content.origin.y),

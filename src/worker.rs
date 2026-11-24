@@ -58,7 +58,9 @@ fn ingest_loop(path: PathBuf, rx: Receiver<Job>, notify: Notify, ocr: Sender<()>
             return;
         }
     };
-    fix_file_refs(&db, &notify);
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| fix_file_refs(&db, &notify))).is_err() {
+        crate::log!("ingest: resolving file references panicked, continuing");
+    }
     while let Ok(job) = rx.recv() {
         // A bug in one clip must never stop recording: contain panics per job.
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_job(&db, job, &notify, &ocr)));

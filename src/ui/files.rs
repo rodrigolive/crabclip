@@ -22,7 +22,7 @@ impl App {
         }
         ui.image_view.setImage(None);
         ui.image_view.setHidden(true);
-        if paths.len() == 1 && std::fs::exists(paths[0]).unwrap_or(false) && self.set_quicklook(Some(paths[0])) {
+        if paths.len() == 1 && present(paths[0]) && self.set_quicklook(Some(paths[0])) {
             ui.text_scroll.setHidden(true);
             return true;
         }
@@ -90,28 +90,27 @@ impl App {
             let s = unsafe { NSAttributedString::new_with_attributes(&NSString::from_str(text), a) };
             out.appendAttributedString(&s);
         };
-        let home = std::env::var("HOME").unwrap_or_default();
         let isz = (fs * 2.4).round();
         // Names and folders start at one tab stop, after the icon.
         let para = objc2_app_kit::NSMutableParagraphStyle::new();
         para.setTabStops(Some(&objc2_foundation::NSArray::new()));
         para.setDefaultTabInterval(isz + 8.0);
         para.setLineBreakMode(objc2_app_kit::NSLineBreakMode::ByTruncatingMiddle);
-        for p in paths {
-            let exists = std::fs::exists(p).unwrap_or(false);
+        for p in paths.iter().take(MAX_LISTED) {
+            let exists = present(p);
             let icon = self.file_icon(p);
             let att = NSTextAttachment::new();
             att.setImage(Some(&icon));
             att.setBounds(NSRect::new(NSPoint::new(0.0, -isz / 4.0), NSSize::new(isz, isz)));
             out.appendAttributedString(&NSAttributedString::attributedStringWithAttachment(&att));
             let (dir, name) = p.rsplit_once('/').unwrap_or(("", p));
-            let dir = match dir.strip_prefix(&home) {
-                Some(rest) if !home.is_empty() => format!("~{rest}"),
-                _ => dir.to_string(),
-            };
+            let dir = tilde(dir);
             add(&format!("\t{name}\n"), &plain);
             let note = if exists { dir } else { format!("{dir} · not found") };
             add(&format!("\t{note}\n\n"), &dim);
+        }
+        if paths.len() > MAX_LISTED {
+            add(&format!("and {} more", paths.len() - MAX_LISTED), &dim);
         }
         unsafe {
             out.addAttribute_value_range(objc2_app_kit::NSParagraphStyleAttributeName, &para, NSRange::new(0, out.length()));
@@ -125,10 +124,33 @@ impl App {
     }
 }
 
+/// Files listed in the pane (each one is a stat and an icon).
+const MAX_LISTED: usize = 200;
+
+/// The file is there, or may be (not allowed to look counts as there).
+fn present(path: &str) -> bool {
+    !matches!(std::fs::exists(path), Ok(false))
+}
+
+/// "~/x" for a path in the home folder.
+pub fn tilde(path: &str) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    match path.strip_prefix(&home) {
+        Some(rest) if !home.is_empty() && (rest.is_empty() || rest.starts_with('/')) => format!("~{rest}"),
+        _ => path.to_string(),
+    }
+}
+
 /// The file line of a file clip's details: size and date, or what is gone.
 pub fn file_summary(text: &str) -> String {
     let paths: Vec<&str> = text.lines().filter(|p| !p.is_empty()).collect();
+    if paths.len() > MAX_LISTED {
+        return format!("{} files", paths.len());
+    }
     let metas: Vec<Option<std::fs::Metadata>> = paths.iter().map(|p| std::fs::metadata(p).ok()).collect();
+    if let [None] = metas.as_slice() {
+        return if present(paths[0]) { "File (no access to read it)".into() } else { "File not found".into() };
+    }
     let modified = |m: &std::fs::Metadata| {
         m.modified()
             .ok()
@@ -138,11 +160,10 @@ pub fn file_summary(text: &str) -> String {
     };
     match metas.as_slice() {
         [] => "No files".into(),
-        [None] => "File not found".into(),
         [Some(m)] if m.is_dir() => format!("Folder{}", modified(m)),
         [Some(m)] => format!("File {}{}", crate::timefmt::bytes(m.len() as i64), modified(m)),
         _ => {
-            let gone = metas.iter().filter(|m| m.is_none()).count();
+            let gone = paths.iter().filter(|p| !present(p)).count();
             let total: u64 = metas.iter().flatten().filter(|m| m.is_file()).map(|m| m.len()).sum();
             match gone {
                 0 => format!("{} files · {}", paths.len(), crate::timefmt::bytes(total as i64)),

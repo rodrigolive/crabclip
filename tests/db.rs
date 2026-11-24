@@ -201,9 +201,19 @@ fn file_reference_urls_become_paths() {
     let mut old = clip.clone();
     old.reps[0].data = url.fileReferenceURL().and_then(|u| u.absoluteString()).unwrap().to_string().into_bytes();
     old.preview = String::from_utf8(old.reps[0].data.clone()).unwrap().trim_start_matches("file://").to_string();
+    old.hash = vec![7; 32]; // hashed from the reference, as it was stored
+    old.source_path = Some(old.preview.clone());
     let id = db.insert(&old, 3).unwrap().id();
     assert_eq!(db.file_ref_clips().unwrap(), vec![id]);
     let mut reps = db.reps(id).unwrap();
     assert!(crabclip::ingest::resolve_file_refs(&mut reps));
+    // As the ingest thread does at start: rebuilt in place, path indexed.
+    let cap = Capture { ts: 1, reps, app: AppInfo::default(), window_title: None, source_path: None, starred: false };
+    let fixed = build(cap, &Settings::default()).unwrap();
+    let kept = db.set_text(id, &fixed, 3).unwrap();
+    db.fix_file_ref_source(kept, fixed.source_path.as_deref()).unwrap();
+    assert_eq!(kept, id);
+    assert!(db.file_ref_clips().unwrap().is_empty());
+    assert_eq!(db.detail(id).unwrap().unwrap().source_path.as_deref(), Some(path.as_str()));
     std::fs::remove_dir_all(&dir).unwrap();
 }

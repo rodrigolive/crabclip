@@ -824,6 +824,7 @@ impl App {
         self.set_folders_field(Some(id), &d.folders);
         ui.date_label.setStringValue(&NSString::from_str(&timefmt::human(d.copied_at)));
         if !self.settings.borrow().preview_open {
+            self.set_quicklook(None);
             return; // filled in when the pane opens
         }
         ui.meta.setStringValue(&NSString::from_str(&meta_text(&d)));
@@ -985,6 +986,7 @@ impl App {
         if p.isVisible() {
             self.modal.set(true); // no resign-key hide meanwhile
             p.orderOut(None);
+            self.set_quicklook(None);
             self.modal.set(false);
             self.last_hide.set(Some(Instant::now()));
         }
@@ -1095,6 +1097,7 @@ impl App {
         self.pasting.set(true);
         self.hide_tag_menu();
         self.ui().panel.orderOut(None);
+        self.set_quicklook(None);
         let nsapp = NSApplication::sharedApplication(self.mtm);
         if nsapp.isActive() {
             if let Some(prev) = self.prev_app.borrow().as_ref() {
@@ -1256,6 +1259,9 @@ impl App {
     pub fn set_preview_open(&self, open: bool) {
         if self.settings.borrow().preview_open == open {
             return; // already so: key repeats do nothing
+        }
+        if !open {
+            self.set_quicklook(None); // stops what it was playing
         }
         {
             let mut s = self.settings.borrow_mut();

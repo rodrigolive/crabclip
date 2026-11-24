@@ -1617,12 +1617,15 @@ impl Db {
         ids
     }
 
-    /// The source path a file reference URL left, now resolved.
+    /// The source path a file reference URL left, now resolved (and indexed).
     pub fn fix_file_ref_source(&self, id: i64, path: Option<&str>) -> Result<()> {
-        self.conn.execute(
+        let n = self.conn.execute(
             "UPDATE clips SET source_path=?2 WHERE id=?1 AND (source_path IS NULL OR source_path LIKE '/.file/id=%')",
             params![id, path],
         )?;
+        if n > 0 {
+            Self::reindex(&self.conn, id)?;
+        }
         Ok(())
     }
 

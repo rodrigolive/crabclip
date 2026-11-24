@@ -133,7 +133,7 @@ pub fn resolve_file_refs(reps: &mut [Rep]) -> bool {
     let mut changed = false;
     for r in reps.iter_mut().filter(|r| r.uti == "public.file-url") {
         let url = String::from_utf8_lossy(&r.data).trim().trim_end_matches('\0').to_string();
-        if !url.starts_with("file:///.file/id=") {
+        if !url.starts_with("file:///.file/id=") && !url.starts_with("file://localhost/.file/id=") {
             continue;
         }
         let resolved = objc2_foundation::NSURL::URLWithString(&objc2_foundation::NSString::from_str(&url))
