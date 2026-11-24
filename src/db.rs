@@ -1610,6 +1610,22 @@ impl Db {
         Ok(id)
     }
 
+    /// File clips stored with a file reference URL (`file:///.file/id=…`).
+    pub fn file_ref_clips(&self) -> Result<Vec<i64>> {
+        let mut st = self.conn.prepare("SELECT id FROM clips WHERE kind='file' AND preview LIKE '%/.file/id=%'")?;
+        let ids = st.query_map([], |r| r.get(0))?.collect();
+        ids
+    }
+
+    /// The source path a file reference URL left, now resolved.
+    pub fn fix_file_ref_source(&self, id: i64, path: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE clips SET source_path=?2 WHERE id=?1 AND (source_path IS NULL OR source_path LIKE '/.file/id=%')",
+            params![id, path],
+        )?;
+        Ok(())
+    }
+
     pub fn count(&self) -> Result<i64> {
         self.conn.query_row("SELECT COUNT(*) FROM clips", [], |r| r.get(0))
     }

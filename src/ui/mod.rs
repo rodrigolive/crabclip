@@ -4,6 +4,7 @@
 mod build;
 pub mod classes;
 mod draw;
+mod files;
 pub mod folders;
 pub mod prefs;
 mod snippets;
@@ -118,6 +119,10 @@ pub struct App {
     select_after: Cell<Option<i64>>,
     /// Clip whose folders the folder field shows.
     folders_clip: Cell<i64>,
+    /// The Quick Look view of the file pane (made the first time) and the
+    /// file it shows.
+    ql: RefCell<Option<Retained<objc2_app_kit::NSView>>>,
+    ql_path: RefCell<Option<String>>,
     pasting: Cell<bool>,
     modal: Cell<bool>,
     /// Clip whose tags the tag field shows (saved there even if the
@@ -212,6 +217,8 @@ fn start(handler: &Handler) {
         entries: RefCell::new(HashMap::new()),
         select_after: Cell::new(None),
         folders_clip: Cell::new(0),
+        ql: RefCell::new(None),
+        ql_path: RefCell::new(None),
         pasting: Cell::new(false),
         modal: Cell::new(false),
         tags_clip: Cell::new(0),
@@ -793,10 +800,12 @@ impl App {
     pub fn update_preview(&self) {
         let ui = self.ui();
         if let Some(fid) = self.selected_row_id().filter(|id| *id < 0).map(|id| -id) {
+            self.set_quicklook(None);
             self.show_folder_preview(fid);
             return;
         }
         let Some(id) = self.selected_id() else {
+            self.set_quicklook(None);
             ui.image_view.setImage(None);
             ui.image_view.setHidden(true);
             ui.text_scroll.setHidden(false);
@@ -817,6 +826,11 @@ impl App {
         if !self.settings.borrow().preview_open {
             return; // filled in when the pane opens
         }
+        ui.meta.setStringValue(&NSString::from_str(&meta_text(&d)));
+        if d.kind == Kind::File && !d.sealed() && self.show_file_preview(&d) {
+            return;
+        }
+        self.set_quicklook(None);
         let mut shown_image = false;
         if d.kind == Kind::Image && !d.sealed() {
             let types = self.db.rep_types(id).unwrap_or_default();
@@ -834,7 +848,6 @@ impl App {
             ui.image_view.setImage(None);
             self.show_text_preview(id, &d);
         }
-        ui.meta.setStringValue(&NSString::from_str(&meta_text(&d)));
     }
 
     fn show_text_preview(&self, id: i64, d: &Detail) {
@@ -949,6 +962,7 @@ impl App {
         let p = &self.ui().panel;
         if p.isVisible() {
             p.orderOut(None);
+            self.set_quicklook(None);
             self.last_hide.set(Some(Instant::now()));
             // We may have activated ourselves (alerts): hand focus back unless
             // another of our windows (Preferences) is in use.
@@ -2107,7 +2121,7 @@ fn meta_text(d: &Detail) -> String {
             let t = d.text.as_deref().unwrap_or("");
             format!("{} chars · {} lines", t.chars().count(), t.lines().count().max(1))
         }
-        Kind::File => format!("{} file(s)", d.text.as_deref().map(|t| t.lines().count()).unwrap_or(0)),
+        Kind::File => files::file_summary(d.text.as_deref().unwrap_or("")),
         Kind::Other => "Other data".into(),
     };
     what += &format!(

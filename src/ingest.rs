@@ -126,6 +126,27 @@ pub fn text_of(reps: &[Rep]) -> Option<String> {
     if t.trim().is_empty() { None } else { Some(t) }
 }
 
+/// Some apps copy a file reference URL (`file:///.file/id=…`) instead of the
+/// file's path. Turn each into the path URL it points to, while the file is
+/// there to resolve. True when one changed.
+pub fn resolve_file_refs(reps: &mut [Rep]) -> bool {
+    let mut changed = false;
+    for r in reps.iter_mut().filter(|r| r.uti == "public.file-url") {
+        let url = String::from_utf8_lossy(&r.data).trim().trim_end_matches('\0').to_string();
+        if !url.starts_with("file:///.file/id=") {
+            continue;
+        }
+        let resolved = objc2_foundation::NSURL::URLWithString(&objc2_foundation::NSString::from_str(&url))
+            .and_then(|u| u.filePathURL())
+            .and_then(|u| u.absoluteString());
+        if let Some(u) = resolved {
+            r.data = u.to_string().into_bytes();
+            changed = true;
+        }
+    }
+    changed
+}
+
 pub fn file_paths(reps: &[Rep]) -> Vec<String> {
     let mut v: Vec<String> = reps
         .iter()
@@ -228,6 +249,7 @@ pub fn build(c: Capture, s: &Settings) -> Option<NewClip> {
     }
     let mut reps = drop_legacy(c.reps);
     reps.retain(|r| !r.data.is_empty());
+    resolve_file_refs(&mut reps);
     if reps.is_empty() {
         return None;
     }

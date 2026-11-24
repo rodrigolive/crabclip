@@ -58,12 +58,41 @@ fn ingest_loop(path: PathBuf, rx: Receiver<Job>, notify: Notify, ocr: Sender<()>
             return;
         }
     };
+    fix_file_refs(&db, &notify);
     while let Ok(job) = rx.recv() {
         // A bug in one clip must never stop recording: contain panics per job.
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_job(&db, job, &notify, &ocr)));
         if r.is_err() {
             crate::log!("ingest: job panicked, continuing");
         }
+    }
+}
+
+/// File clips stored with a file reference URL showed "/.file/id=…": resolve
+/// them to their paths, for the files still there.
+fn fix_file_refs(db: &Db, notify: &Notify) {
+    let s = Settings::load(db);
+    let mut fixed = 0;
+    for id in db.file_ref_clips().unwrap_or_default() {
+        objc2::rc::autoreleasepool(|_| {
+            let Ok(mut reps) = db.reps(id) else { return };
+            if !crate::ingest::resolve_file_refs(&mut reps) {
+                return;
+            }
+            let cap = Capture { ts: 0, reps, app: Default::default(), window_title: None, source_path: None, starred: false };
+            let Some(clip) = crate::ingest::build(cap, &s) else { return };
+            match db.set_text(id, &clip, s.zstd_level) {
+                Ok(kept) => {
+                    let _ = db.fix_file_ref_source(kept, clip.source_path.as_deref());
+                    crate::log!("ingest: clip {id}: file reference resolved to {}", clip.preview);
+                    fixed += 1;
+                }
+                Err(e) => crate::log!("ingest: clip {id}: file reference: {e}"),
+            }
+        });
+    }
+    if fixed > 0 {
+        notify(Event::Pruned(0));
     }
 }
 

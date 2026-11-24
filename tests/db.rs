@@ -168,3 +168,42 @@ fn insert_waits_for_a_concurrent_writer() {
     t.join().unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn file_reference_urls_become_paths() {
+    let dir = std::env::temp_dir().join(format!("crabclip-fileref-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("Short demo.pptx");
+    std::fs::write(&file, b"slides").unwrap();
+    let path = std::fs::canonicalize(&file).unwrap().to_string_lossy().into_owned();
+    // What some apps put on the pasteboard: file:///.file/id=…
+    let url = objc2_foundation::NSURL::fileURLWithPath(&objc2_foundation::NSString::from_str(&path));
+    let reference = url.fileReferenceURL().and_then(|u| u.absoluteString()).unwrap().to_string();
+    assert!(reference.starts_with("file:///.file/id="), "{reference}");
+
+    let cap = Capture {
+        ts: 1,
+        reps: vec![Rep { item: 0, uti: "public.file-url".into(), data: reference.into_bytes() }],
+        app: AppInfo::default(),
+        window_title: None,
+        source_path: None,
+        starred: false,
+    };
+    let clip = build(cap, &Settings::default()).unwrap();
+    assert_eq!(clip.kind, Kind::File);
+    assert_eq!(clip.preview, path);
+    assert_eq!(clip.source_path.as_deref(), Some(path.as_str()));
+    let rep = String::from_utf8(clip.reps[0].data.clone()).unwrap();
+    assert!(rep.starts_with("file:///") && !rep.contains("/.file/id="), "{rep}");
+
+    // A stored clip from before is resolved in place.
+    let db = Db::open_memory().unwrap();
+    let mut old = clip.clone();
+    old.reps[0].data = url.fileReferenceURL().and_then(|u| u.absoluteString()).unwrap().to_string().into_bytes();
+    old.preview = String::from_utf8(old.reps[0].data.clone()).unwrap().trim_start_matches("file://").to_string();
+    let id = db.insert(&old, 3).unwrap().id();
+    assert_eq!(db.file_ref_clips().unwrap(), vec![id]);
+    let mut reps = db.reps(id).unwrap();
+    assert!(crabclip::ingest::resolve_file_refs(&mut reps));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
